@@ -1,0 +1,720 @@
+---
+title: "Migraine_Init"
+output: pdf_document
+date: "2025-12-27"
+---
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(lubridate)
+library(mice)   
+library(VIM)    
+library(zoo)
+```
+
+```{r}
+# Set your working directory
+my_dir <- ""  # replace with your path
+
+# Load baseline dataset
+baseline_data<- read.csv(file.path(my_dir, 'yourdatabaseline'), sep=";")
+summary(baseline_data)
+head(baseline_data)
+```
+```{r}
+# Load longitudinal dataset
+long_data <- read.csv(file.path(my_dir, 'yourdatalongitudinal'), sep=";")
+summary(long_data)
+head(long_data)
+```
+
+# Data Exploration 
+
+```{r}
+# Inspect structure and summaries
+str(baseline_data)
+summary(baseline_data)
+```
+
+0.1 : Inspect baseline distributions (age, sex, diagnosis, comorbidities).
+
+Histograms for continuous variables 
+Bar plots for categorical variables
+
+```{r}
+variabili_continue <- c(
+  "AGE", "WEIGTH", "HEIGTH", "BMI", "MONTHS_OF_TREAT", 
+  "AGE_OF_ONSET", "AGE_W_CHRONICMIGRAINE", "NUM_TRAT",
+  "GGCEF_T0", "INT_T0", "Psycopathological" 
+)
+
+variabili_categoriche <- c(
+  "SEX", "DIAGNOSIS", "Suspension", "TREATMENT_DISC", 
+  "FAMILIARITY", "SIDE", "PULSATING", "PAIN_MOVMENT", "Aura",
+  "T0_SYMPT_TREATMENT", "ANTIBODY", "Bbloc", "Caant", "Tricyclic",
+  "Antiepil", "SSRISNRI", "Antiipnt", "Pizotifene", "Botulin", "DETOXPRE",
+  "Hypertension", "Sleep_Disorders", "PREV_T0"
+)
+```
+
+
+```{r, fig.width=16, fig.height=12}
+baseline_data %>%
+  select(all_of(variabili_continue)) %>%
+  gather(key="variable", value="value") %>%
+  ggplot(aes(x=value)) +
+  geom_histogram(binwidth=1, fill="steelblue", color="black") + 
+  facet_wrap(~variable, scales="free", ncol=4) + 
+  theme_minimal(base_size = 14)
+```
+
+### 2. Per le Variabili Categoriche
+
+
+```{r, fig.width=16, fig.height=14}
+baseline_data %>%
+  select(all_of(variabili_categoriche)) %>%
+  gather(key="variable", value="value") %>%
+  ggplot(aes(x=value)) +
+  geom_bar(fill="coral", color="black") +
+  facet_wrap(~variable, scales="free", ncol=4) +
+  theme_minimal(base_size = 14) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1) # Ruota solo il testo
+  )
+
+```
+
+
+- AGE, continous variable 
+```{r}
+# AGE 
+baseline_data %>%
+select(AGE) %>%
+gather(key="variable", value="value") %>%
+ggplot(aes(x=value)) +
+geom_histogram(binwidth=1, fill="steelblue", color="black") +
+facet_wrap(~variable, scales="free") +
+theme_minimal()
+```
+
+- SEX, categorical variable 
+```{r}
+baseline_data %>%
+select(SEX, DIAGNOSIS) %>%
+gather(key="variable", value="value") %>%
+ggplot(aes(x=value)) +
+geom_bar(fill="coral", color = "black") +
+facet_wrap(~variable, scales="free") +
+theme_minimal()
+```
+
+"Explore longitudinal trends in MMDs and headache severity" and "Quantify dropouts and treatment discontinuations"
+### Visualize Longitudinal Trends (MMDs and Severity)
+
+```{r}
+# 1. Summarize MMDs and Intensity by Cycle and Month
+long_summary <- long_data %>%
+  group_by(CYCLE, MONTH) %>%
+  summarise(
+    Mean_MMDs = mean(MMDs, na.rm = TRUE),
+    Mean_Intensity = mean(INT, na.rm = TRUE),
+    .groups = 'drop'
+  )
+# 2. Plot the trajectory of MMDs over the 3 Cycles
+ggplot(long_summary, aes(x = factor(MONTH), y = Mean_MMDs, group = CYCLE, color = factor(CYCLE))) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(
+    title = "Longitudinal Trend of Monthly Migraine Days (MMDs)",
+    subtitle = "Average MMDs across 3 Treatment Cycles",
+    x = "Month within Cycle",
+    y = "Mean MMDs",
+    color = "Cycle"
+  ) +
+  theme_minimal()
+```
+
+
+```{r}
+# 3. Plot the trajectory of Headache Intensity (INT)
+ggplot(long_summary, aes(x = factor(MONTH), y = Mean_Intensity, group = CYCLE, color = factor(CYCLE))) +
+  geom_line(size = 1) +
+  geom_point(size = 2) +
+  labs(
+    title = "Longitudinal Trend of Headache Intensity",
+    x = "Month within Cycle",
+    y = "Mean Intensity (0-10)",
+    color = "Cycle"
+  ) +
+  theme_minimal()
+```
+####Quantify Dropouts
+
+
+```{r}
+# 1. Count dropouts (Suspension)
+# 0 = Completed, 1 = Discontinued
+table(baseline_data$Suspension)
+
+# 2. Visualize reasons for discontinuation (TREATMENT_DISC)
+# This helps explain *why* patients dropped out
+baseline_data %>%
+  filter(Suspension == 1) %>%
+  ggplot(aes(x = factor(TREATMENT_DISC))) +
+  geom_bar(fill = "firebrick", color = "black") +
+  labs(
+    title = "Reasons for Treatment Discontinuation",
+    x = "Reason Code (TREATMENT_DISC)",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+
+
+## Task 1 missingness check and imputation
+
+
+```{r}
+library(mice)
+library(VIM)
+library(dplyr)
+
+# 1. Visualize pattern for Baseline Variables
+# Assume 'baseline_df' contains your baseline columns (demographics, history)
+md.pattern(baseline_data, rotate.names = TRUE)
+
+# 2. Visualize pattern for Longitudinal Variables
+# Assume 'longitudinal_df' contains repeated measures
+aggr(long_data, col=c('navyblue','red'), numbers=TRUE, sortVars=TRUE,
+     labels=names(long_data), cex.axis=.7, gap=3,
+     ylab=c("Histogram of missing data","Pattern"))
+```
+
+
+
+
+
+
+
+```{r}
+# ==============================================================================
+# 1. SETUP & LIBRARIES
+# ==============================================================================
+library(mice)   # For multivariate imputation
+library(VIM)    # For visualization
+library(dplyr)  # For data manipulation
+library(zoo)    # For time-series functions (LOCF, Interpolation)
+library(ggplot2)# For plotting trajectories
+
+# 3. SIMPLE & LONGITUDINAL IMPUTATION STRATEGIES
+# Create a working copy
+df_long_imp <- long_data
+
+# --- Strategy A: Simple Mean Imputation (The "Bad" Baseline) ---
+mean_mmds <- mean(df_long_imp$MMDs, na.rm = TRUE)
+df_long_imp$MMDs_Mean <- ifelse(is.na(df_long_imp$MMDs), mean_mmds, df_long_imp$MMDs)
+
+# --- Strategy B: Time-Aware Strategies (LOCF & Interpolation) ---
+df_long_imp <- df_long_imp %>%
+  group_by(SUBJECT_ID) %>%
+  arrange(CYCLE) %>%
+  mutate(
+    # LOCF: Carries last value forward (Step-like)
+    MMDs_LOCF = na.locf(MMDs, na.rm = FALSE),
+    # Interpolation: Connects dots (Linear)
+    MMDs_Interp = na.approx(MMDs, na.rm = FALSE)
+  ) %>%
+  ungroup()
+
+# 4. ADVANCED MODEL-BASED IMPUTATION (MICE)
+# Select columns that help predict MMDs (include correlations like MIDAS, HIT6)
+# We exclude 'SUBJECT_ID' as it is not a predictor
+cols_for_mice <- c("CYCLE", "MMDs", "MIDAS", "HIT6", "HADSD", "HADSA", "GGFAR")
+
+# Setup MICE
+init <- mice(long_data[, cols_for_mice], maxit = 0)
+meth <- init$method
+pred <- init$predictorMatrix
+
+# Customize Method: Predictive Mean Matching (pmm) is best for clinical scores
+# It preserves the distribution and prevents impossible values (e.g., negative days)
+meth["MMDs"] <- "pmm"
+meth["MIDAS"] <- "pmm"
+
+# Run Imputation (m=5 datasets, maxit=10 iterations)
+imp_mice <- mice(long_data[, cols_for_mice], 
+                 method = meth, 
+                 predictorMatrix = pred, 
+                 m = 5, maxit = 10, seed = 123, print = FALSE)
+
+# Extract the completed dataset (using the first imputed set)
+long_data_mice <- complete(imp_mice, 1)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# --- STEP 1: Impute Baseline Data (Static Variables) ---
+# We impute this SEPARATELY so static vars (Age, Sex, BMI) stay constant per patient.
+
+# A. Prepare Baseline for MICE
+# We temporarily remove the ID so MICE doesn't try to predict it
+# Ensure you use the correct ID column name (SUBJECT_ID based on your previous files)
+baseline_vars <- baseline_data %>%
+  select(-SUBJECT_ID) 
+
+# B. Configure Methods Smartly (PMM for numbers, Logreg for factors)
+init <- mice(baseline_vars, maxit = 0)
+meth <- init$method
+pred <- init$predictorMatrix
+
+# Automate method selection
+vars <- names(baseline_vars)
+for(var in vars) {
+  if(is.numeric(baseline_vars[[var]])) {
+    meth[var] <- "pmm"
+  } else if(is.factor(baseline_vars[[var]])) {
+    if(nlevels(baseline_vars[[var]]) == 2) {
+      meth[var] <- "logreg"
+    } else {
+      meth[var] <- "polyreg"
+    }
+  }
+}
+
+# C. Run MICE on Baseline Only
+# m=5 is standard, but for the final "clean" dataset to merge, we usually pick 1.
+imp_base <- mice(baseline_vars, 
+                 method = meth, 
+                 predictorMatrix = pred, 
+                 m = 5, 
+                 maxit = 10, 
+                 seed = 500, 
+                 print = FALSE)
+
+# D. Create the Clean Baseline Dataset
+baseline_clean <- complete(imp_base, 1)
+
+# E. Add the ID back (Critical!)
+# We assume the row order didn't change (MICE preserves order)
+baseline_clean$SUBJECT_ID <- baseline_data$SUBJECT_ID
+
+# Verify no NAs in baseline
+print(paste("Missing values in Baseline:", sum(is.na(baseline_clean))))
+```
+
+
+
+```{r}
+# --- STEP 2 (FIXED): Impute ALL Time-Varying Variables ---
+
+library(zoo)
+library(dplyr)
+
+# 1. Define the full list of longitudinal variables to impute
+# We added GGFAR, DaysWithCefalea, HADSA, HADSD, HIT6, MIDAS, and DOSE.
+# Note: We exclude 'RED_MMD_VST01' because it looks like a calculated outcome 
+# (Reduction at Visit 1) that should be re-calculated later, not imputed.
+long_vars_to_impute <- c("MMDs", "INT", 
+                         "GGFAR", "DaysWithCefalea", 
+                         "HADSA", "HADSD", 
+                         "HIT6", "MIDAS", 
+                         "DOSE")
+
+# 2. Apply LOCF (Last Observation Carried Forward)
+long_clean <- long_data %>%
+  arrange(SUBJECT_ID, CYCLE, MONTH) %>%  # Critical: Sort by time
+  group_by(SUBJECT_ID) %>%
+  mutate(
+    # A. Forward Fill (LOCF): Fills missing Visit 2 with data from Visit 1
+    across(any_of(long_vars_to_impute), ~ na.locf(., na.rm = FALSE)),
+    
+    # B. Backward Fill (NOCB): Fills missing Visit 1 if it's the only one missing
+    across(any_of(long_vars_to_impute), ~ na.locf(., fromLast = TRUE, na.rm = FALSE))
+  ) %>%
+  ungroup()
+
+# 3. Verify that these specific columns are now clean
+# This should print zeros (or very close to zero)
+print("Remaining NAs in Clinical Scores:")
+print(colSums(is.na(long_clean[, intersect(names(long_clean), long_vars_to_impute)])))
+```
+
+
+
+```{r}
+# Check missing values per column
+col_missing <- colSums(is.na(master_data_final))
+print(col_missing[col_missing > 0])
+```
+
+```{r}
+# --- STEP 4: Targeted Rescue Imputation ---
+
+# 1. Setup MICE for the Master File
+# We use maxit=0 to get the default setup
+init <- mice(master_data_final, maxit = 0)
+meth <- init$method
+pred <- init$predictorMatrix
+
+# 2. Configure Methods: TURN OFF everything except HADSA/HADSD
+# We set all methods to "" (empty) so MICE doesn't touch your clean data.
+meth[names(meth)] <- "" 
+
+# We set ONLY the missing variables to 'pmm' (Predictive Mean Matching)
+# (Add HIT6 or MIDAS here if they are also still missing)
+vars_to_rescue <- c("HADSA", "HADSD")
+meth[vars_to_rescue] <- "pmm"
+
+# 3. Configure Predictors
+# Do not use IDs to predict
+ids_to_ignore <- c("SUBJECT_ID", "SEQUENCE", "CYCLE", "MONTH", "RED_MMD_VST01")
+pred[, intersect(ids_to_ignore, colnames(pred))] <- 0
+
+# 4. Run the Rescue Imputation
+# This uses your clean MMDs, Age, and Sex to guess the missing Anxiety/Depression scores.
+# We only need m=1 because this is a final clean-up.
+imp_rescue <- mice(master_data_final, 
+                   method = meth, 
+                   predictorMatrix = pred, 
+                   m = 1, 
+                   maxit = 5, 
+                   seed = 123, 
+                   print = FALSE)
+
+# 5. Extract the Final Dataset
+master_data_final <- complete(imp_rescue, 1)
+
+# --- FINAL VERIFICATION ---
+# This must be 0 for the critical variables
+print("Remaining NAs in Clinical Scores:")
+print(colSums(is.na(master_data_final[, vars_to_rescue])))
+```
+
+
+
+```{r}
+print(colSums(is.na(master_data_final)))
+
+```
+```{r}
+head(master_data_final, 100)
+```
+
+
+
+
+```{r}
+# 1. Check if row numbers match (Just to be safe)
+if(nrow(baseline_clean) == nrow(baseline_data)) {
+  print("Rows match. restoring IDs...")
+  
+  # 2. Copy the ID from the original file
+  baseline_clean$SUBJECT_ID <- baseline_data$SUBJECT_ID
+  
+  # 3. Move SUBJECT_ID to the first column (optional, but cleaner)
+  baseline_clean <- baseline_clean %>%
+    select(SUBJECT_ID, everything())
+    
+  print("Success! SUBJECT_ID added.")
+  
+} else {
+  print("Error: Row counts do not match. Did you filter baseline_data?")
+}
+
+# 4. Check the result
+head(baseline_clean)
+```
+
+```{r}
+print(colSums(is.na(baseline_clean)))
+
+```
+```{r}
+print(colSums(is.na(long_clean)))
+
+```
+
+
+
+
+
+```{r}
+# --- PREPARATION ---
+library(dplyr)
+library(ggplot2)
+library(Rtsne)
+library(umap)
+
+# 1. Prepare the Input Data
+# We remove SUBJECT_ID so it doesn't skew the math.
+# We also remove the variable we want to use for coloring (GGCEF_T0) 
+# so the algorithm doesn't "cheat" by using the answer to cluster patients.
+pca_input <- baseline_clean %>%
+  select(-SUBJECT_ID, -GGCEF_T0) %>%
+  mutate(across(where(is.character), as.factor))
+
+# 2. Convert Factors to Numeric
+# We use a safe loop to convert Sex, Diagnosis, etc. into numbers.
+for(col in names(pca_input)) {
+  if(is.factor(pca_input[[col]]) || is.character(pca_input[[col]])) {
+    pca_input[[col]] <- as.numeric(as.factor(pca_input[[col]]))
+  }
+}
+
+# 3. Remove Constant Columns (Zero Variance)
+# If a column has the same value for everyone (e.g., if everyone is "Female"), we drop it.
+vars_to_keep <- c()
+for(col in names(pca_input)) {
+  v <- var(pca_input[[col]], na.rm = TRUE)
+  if(!is.na(v) && v > 0) vars_to_keep <- c(vars_to_keep, col)
+}
+pca_input <- pca_input[, vars_to_keep]
+
+
+# --- PART A: PCA ---
+# Scale=TRUE is critical to balance Age (0-100) vs BMI (15-40)
+pca_res <- prcomp(pca_input, center = TRUE, scale. = TRUE)
+
+# Plotting DataFrame
+df_pca <- data.frame(
+  PC1 = pca_res$x[, 1],
+  PC2 = pca_res$x[, 2],
+  Severity = baseline_clean$GGCEF_T0  # Color by Baseline Headache Days
+)
+
+ggplot(df_pca, aes(x = PC1, y = PC2, colour = Severity)) +
+  geom_point(alpha = 0.7) +
+  scale_color_viridis_c(option = "magma", name = "Days w/ Headache") +
+  labs(title = "PCA (Baseline)", subtitle = "Colored by Baseline Headache Frequency") +
+  theme_minimal()
+
+
+# --- PART B: t-SNE ---
+# We use the same clean input. 
+# check_duplicates=FALSE is safe here because we know baseline_clean has unique patients.
+set.seed(1133)
+tsne_res <- Rtsne(pca_input, perplexity = 30, pca = FALSE, check_duplicates = FALSE)
+
+df_tsne <- data.frame(
+  tSNE1 = tsne_res$Y[, 1],
+  tSNE2 = tsne_res$Y[, 2],
+  Severity = baseline_clean$GGCEF_T0
+)
+
+ggplot(df_tsne, aes(x = tSNE1, y = tSNE2, colour = Severity)) +
+  geom_point(alpha = 0.7, size = 2) +
+  scale_color_viridis_c(option = "magma", name = "Days w/ Headache") +
+  labs(title = "t-SNE (Baseline)") +
+  theme_minimal()
+
+
+# --- PART C: UMAP ---
+config <- umap.defaults
+config$random_state <- 1133
+umap_res <- umap(pca_input, config = config)
+
+df_umap <- data.frame(
+  UMAP1 = umap_res$layout[, 1],
+  UMAP2 = umap_res$layout[, 2],
+  Severity = baseline_clean$GGCEF_T0
+)
+
+ggplot(df_umap, aes(x = UMAP1, y = UMAP2, colour = Severity)) +
+  geom_point(alpha = 0.7, size = 2) +
+  scale_color_viridis_c(option = "magma", name = "Days w/ Headache") +
+  labs(title = "UMAP (Baseline)") +
+  theme_minimal()
+```
+PCA
+At baseline, there is no clear linear separation of patients. Severity exists on a sliding scale (spectrum) rather than distinct "Severe" vs. "Mild" types.
+
+t-SNE
+his tells us that "Severity" is not the main factor dividing your population. There is a much stronger categorical variable driving this split.
+
+Hypothesis: In medical datasets, a perfect split into two large islands like this is almost always caused by Sex (Male vs. Female) or Diagnosis (e.g., Episodic vs. Chronic Migraine).
+
+This means you likely have "Severe Males" and "Severe Females" (or "Severe Episodic" and "Severe Chronic") appearing as distinct biological clusters.
+
+UMAP
+The underlying structure of your baseline population is bimodal (two main types).
+
+```{r}
+
+# --- PREPARATION ---
+library(dplyr)
+library(ggplot2)
+library(Rtsne)
+library(umap)
+
+# 1. Prepare the Input Data
+# We start with 'long_clean' (your imputed longitudinal file).
+# We REMOVE:
+#  - IDs and Time (SUBJECT_ID, SEQUENCE, CYCLE, MONTH) -> To focus on clinical state
+#  - High-Missing Cols (HADSA, HADSD, RED_MMD_VST01) -> To prevent errors
+#  - HIT6 -> We keep it in a separate variable for coloring, but remove from input.
+long_viz_input <- long_clean %>%
+  ungroup() %>%
+  select(-c(SUBJECT_ID, SEQUENCE, CYCLE, MONTH, HIT6)) %>%
+  select(-any_of(c("HADSA", "HADSD", "RED_MMD_VST01"))) %>% # Remove the empty cols
+  mutate(across(where(is.character), as.factor))
+
+# 2. Convert Factors to Numeric
+for(col in names(long_viz_input)) {
+  if(is.factor(long_viz_input[[col]]) || is.character(long_viz_input[[col]])) {
+    long_viz_input[[col]] <- as.numeric(as.factor(long_viz_input[[col]]))
+  }
+}
+
+# 3. Remove Constant Columns (Zero Variance)
+# LOCF can create constant columns; we filter them out to be safe.
+vars_to_keep <- c()
+for(col in names(long_viz_input)) {
+  v <- var(long_viz_input[[col]], na.rm = TRUE)
+  if(!is.na(v) && v > 0) vars_to_keep <- c(vars_to_keep, col)
+}
+long_viz_input <- long_viz_input[, vars_to_keep]
+
+
+# --- PART A: PCA (All Visits) ---
+# Each dot is one visit (Month 0, 1, 2...). 
+pca_res <- prcomp(long_viz_input, center = TRUE, scale. = TRUE)
+
+df_pca <- data.frame(
+  PC1 = pca_res$x[, 1],
+  PC2 = pca_res$x[, 2],
+  HIT6 = long_clean$HIT6,      # Color by severity
+  Month = as.factor(long_clean$MONTH) # Shape/Context (optional)
+)
+
+ggplot(df_pca, aes(x = PC1, y = PC2, colour = HIT6)) +
+  geom_point(alpha = 0.6) +
+  scale_color_viridis_c(option = "magma", name = "HIT6 Score") +
+  labs(title = "PCA (All Patient Visits)", 
+       subtitle = "Visualizing the trajectory of patient states over time") +
+  theme_minimal()
+
+
+# --- PART B: t-SNE (Unique Clinical States) ---
+# t-SNE crashes on duplicates. Longitudinal data has MANY duplicates due to LOCF.
+# We must find the unique "Clinical Profiles" first.
+
+# 1. Combine Input + Label to find unique rows
+temp_combined <- long_viz_input
+temp_combined$HIT6_Label <- long_clean$HIT6
+dedup_data <- unique(temp_combined)
+
+# 2. Separate back
+tsne_input <- dedup_data %>% select(-HIT6_Label)
+tsne_labels <- dedup_data$HIT6_Label
+
+# 3. Run t-SNE on unique profiles
+set.seed(1133)
+tsne_res <- Rtsne(tsne_input, perplexity = 30, pca = FALSE, check_duplicates = FALSE)
+
+df_tsne <- data.frame(
+  tSNE1 = tsne_res$Y[, 1],
+  tSNE2 = tsne_res$Y[, 2],
+  HIT6 = tsne_labels
+)
+
+ggplot(df_tsne, aes(x = tSNE1, y = tSNE2, colour = HIT6)) +
+  geom_point(alpha = 0.7, size = 2) +
+  scale_color_viridis_c(option = "magma", name = "HIT6 Score") +
+  labs(title = "t-SNE (Unique Clinical States)",
+       subtitle = "Clustering distinct health profiles observed during the study") +
+  theme_minimal()
+
+
+# --- PART C: UMAP (Unique Clinical States) ---
+config <- umap.defaults
+config$random_state <- 1133
+# We use the same 'tsne_input' (unique profiles) for consistency
+umap_res <- umap(tsne_input, config = config)
+
+df_umap <- data.frame(
+  UMAP1 = umap_res$layout[, 1],
+  UMAP2 = umap_res$layout[, 2],
+  HIT6 = tsne_labels
+)
+
+ggplot(df_umap, aes(x = UMAP1, y = UMAP2, colour = HIT6)) +
+  geom_point(alpha = 0.7, size = 2) +
+  scale_color_viridis_c(option = "magma", name = "HIT6 Score") +
+  labs(title = "UMAP (Unique Clinical States)") +
+  theme_minimal()
+
+
+
+```
+
+
+
+1. Analysis of PCA (The "Outlier" Effect)
+Plot:
+
+Observation: Notice how almost all your data is squashed into a flat pancake at the bottom, while one single dot (or a tiny group) sits high up at PC2 > 20.
+
+Diagnosis: This indicates a massive outlier in your data. One patient visit likely has an extreme value in one of the variables (e.g., MMDs = 30 when the max is usually 15, or a typo like 999).
+
+Why it happens: PCA tries to maximize variance. If one point is miles away, PCA stretches the axis to include it, squashing everyone else.
+
+Action: For now, you can ignore it since t-SNE and UMAP handled it well. But in a real study, you would find that patient and check if their data is a typo.
+
+2. Analysis of t-SNE and UMAP (The "Clinical Landscape")
+Plots: t-SNE and UMAP
+
+These plots are excellent. Unlike the PCA, they are "non-linear," so they handled the outlier gracefully and revealed the true structure.
+
+The Gradient (Validation):
+
+Looking at the coloring. There is a perfect gradient from Dark Purple (HIT6 ~40, Low Impact) to Bright Yellow (HIT6 ~70, Severe Impact).
+
+Scientific Meaning: This confirms that the variables we used to build the map (MMDs, Intensity, DaysWithCefalea) are excellent predictors of the patient's subjective suffering (HIT6). The math successfully grouped "sick" visits together and "healthy" visits together.
+
+The Structure:
+
+UMAP shows a "branching" structure. You can imagine a patient starting in the Yellow Cluster (Severe) at Month 0. If the treatment works, their dot for Month 3 might move into the Purple Cluster (Mild).
+
+This map essentially visualizes the trajectory of recovery.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
